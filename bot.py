@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-游刃有余双冷方案 · Telegram 自动推送机器人 (滚动三期计划 + 单期命中率 + 可配置延迟)
+游刃有余双冷方案 · Telegram 自动推送机器人 (无白名单)
+- 任何群均可订阅
+- 底部显示最近10个滚动三期计划
+- 单期命中率 = 历史总命中比例
+- 可配置延迟发布（环境变量 DELAY_SECONDS）
 """
 
 import os
@@ -19,13 +23,14 @@ from telegram.ext import (
 
 # ==================== 配置 ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-TARGET_CHAT_ID = os.environ.get("TARGET_CHAT_ID", "")
+TARGET_CHAT_ID = os.environ.get("TARGET_CHAT_ID", "")   # 初始订阅群组（可选）
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "./data"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
-DELAY_SECONDS = int(os.environ.get("DELAY_SECONDS", "0"))   # 发布前延迟秒数
+DELAY_SECONDS = int(os.environ.get("DELAY_SECONDS", "0"))
 API_URL = "https://dp28-engine.vercel.app/api/pc28"
 MAX_WINDOW = 11
+MAX_HISTORY = 500
 COMBO_ORDER = ["小单", "小双", "大单", "大双"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -221,21 +226,19 @@ def fill_history_gaps():
             "mode": rec["morph"]["type"] if rec["morph"]["triggered"] else "正常"
         }
         history.append(record)
-    seen = set(); new_history = []
+    seen = set()
+    new_history = []
     for h in history:
         if h["period"] not in seen:
-            seen.add(h["period"]); new_history.append(h)
-    new_history.sort(key=lambda x: int(x["period"]), reverse=True)  # 按数字排序
-    history.clear(); history.extend(new_history[:50])
+            seen.add(h["period"])
+            new_history.append(h)
+    new_history.sort(key=lambda x: int(x["period"]), reverse=True)
+    history.clear()
+    history.extend(new_history[:MAX_HISTORY])
 
 
 def calc_plan_stats(hist):
-    """
-    滚动三期计划：按时间升序遍历，一旦命中或连黑3期就完成计划。
-    返回 (最近10个计划列表, 单期命中率信息)
-    """
     if len(hist) < 1: return [], 0, 0
-    # 按期号数字升序（旧->新）
     sorted_hist = sorted(hist, key=lambda x: int(x["period"]))
     plans = []
     i = 0
@@ -259,9 +262,7 @@ def calc_plan_stats(hist):
                 end_period = sorted_hist[-1]["period"]
             plans.append({"range": f"{start_period}～{end_period}", "success": False})
             i += 3
-    # 最近10个（最新的在列表末尾）
     recent_plans = plans[-10:] if len(plans) >= 10 else plans
-    # 单期命中率：所有期中命中（A或B至少一个）的期数占总期数的比例
     total_periods = len(hist)
     hit_periods = sum(1 for h in hist if h["hitA"] or h["hitB"])
     return recent_plans, total_periods, hit_periods
@@ -324,11 +325,10 @@ async def check_and_push(bot: Bot):
             "mode": last_morph.get("type", "正常") if last_morph["triggered"] else "正常"
         }
         history.insert(0, record)
-        if len(history) > 50: history = history[:50]
+        if len(history) > MAX_HISTORY: history = history[:MAX_HISTORY]
 
     fill_history_gaps()
 
-    # ---------- 三期计划 & 单期命中率 ----------
     recent_plans, total_periods, hit_periods = calc_plan_stats(history)
     if total_periods > 0:
         single_rate = hit_periods / total_periods * 100
@@ -336,9 +336,7 @@ async def check_and_push(bot: Bot):
     else:
         plan_info = "💡 单期命中率：暂无数据\n"
 
-    # 最近10个滚动计划
     plan_lines = "\n".join(f"{p['range']} {'✅' if p['success'] else '❌'}" for p in recent_plans) + "\n"
-    # -----------------------------------------
 
     display_b = result["b"]
     a_display = f"{result['a']} 第{result['aPeriod']}期"
@@ -376,7 +374,6 @@ async def check_and_push(bot: Bot):
         f"{plan_lines}"
     )
 
-    # 延迟发布
     if DELAY_SECONDS > 0:
         await asyncio.sleep(DELAY_SECONDS)
 
@@ -396,7 +393,7 @@ async def check_and_push(bot: Bot):
     save_all_state()
 
 
-# ==================== 命令处理 ====================
+# ==================== 命令处理（无限制） ====================
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎯 <b>游刃有余双冷方案</b>\n命令：/subscribe /unsubscribe /status /stats /history /help", parse_mode=ParseMode.HTML)
@@ -459,7 +456,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("/subscribe /unsubscribe /status /stats /history /help")
 
 async def cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Chat ID: <code>{update.effective_chat.id}</code>", parse_mode=ParseMode.HTML)
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(f"Chat ID: <code>{chat_id}</code>", parse_mode=ParseMode.HTML)
 
 
 async def polling_job(context: CallbackContext):
@@ -467,6 +465,7 @@ async def polling_job(context: CallbackContext):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"错误: {context.error}")
+
 
 def main():
     if not BOT_TOKEN: logger.error("❌ 未设置 BOT_TOKEN"); return
@@ -477,7 +476,8 @@ def main():
             if cid:
                 try: subscribers.add(int(cid))
                 except ValueError: subscribers.add(cid)
-        save_all_state()
+    save_all_state()
+
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
