@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-游刃有余双冷方案 · Telegram 自动推送机器人 (最终版)
-底部显示最近一个三期计划对错 + 单期计划命中率
+游刃有余双冷方案 · Telegram 自动推送机器人 (滚动三期计划版)
+底部显示最近10个已完成三期计划对错 + 单期计划命中率 + 可配置延迟发布
 """
 
 import os
@@ -25,6 +25,7 @@ TARGET_CHAT_ID = os.environ.get("TARGET_CHAT_ID", "")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 DATA_DIR = Path(os.environ.get("DATA_DIR", "./data"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
+DELAY_SECONDS = int(os.environ.get("DELAY_SECONDS", "0"))
 API_URL = "https://dp28-engine.vercel.app/api/pc28"
 MAX_WINDOW = 11
 COMBO_ORDER = ["小单", "小双", "大单", "大双"]
@@ -117,7 +118,7 @@ def get_recommendation(win: list, state: dict) -> dict:
             "单双跳": ("大单", "小双"), "大小跳": ("大单", "小双"),
         }
         a_rec, b_rec = mapping.get(morph["type"], ("大双", "小双"))
-        return {"a": a_rec, "b": b_rec, "aPeriod": 1, "bPeriod": 1, "aLogic": morph["type"], "bLogic": morph["type"], "morph": morph, "cnt": cnt, "isMorph": True, "needNewA": True, "needNewB": True, "newBisHot": False}
+        return {"a": a_rec, "b": b_rec, "aPeriod": 1, "bPeriod": 1, "morph": morph, "cnt": cnt, "isMorph": True, "needNewA": True, "needNewB": True, "newBisHot": False}
     need_new_a = not a["rec"] or a["period"] == 1
     need_new_b = not b["rec"] or b["period"] == 1
     new_a = a["rec"]
@@ -148,8 +149,7 @@ def get_recommendation(win: list, state: dict) -> dict:
                 b_candidate = hot_combo
                 new_b_is_hot = True
         new_b = b_candidate
-    # 不再显示冷热逻辑，只保留推荐本身，但为了兼容性保留 aLogic
-    return {"a": new_a, "b": new_b, "aPeriod": a["period"], "bPeriod": b["period"], "aLogic": "", "bLogic": "", "morph": morph, "cnt": cnt, "isMorph": False, "needNewA": need_new_a, "needNewB": need_new_b, "newBisHot": new_b_is_hot}
+    return {"a": new_a, "b": new_b, "aPeriod": a["period"], "bPeriod": b["period"], "morph": morph, "cnt": cnt, "isMorph": False, "needNewA": need_new_a, "needNewB": need_new_b, "newBisHot": new_b_is_hot}
 
 
 def update_state(latest_result: Optional[str], win: list, state: dict) -> dict:
@@ -282,34 +282,52 @@ def fill_history_gaps():
 
 def calc_plan_stats(hist):
     """
-    返回: (total_plans, success_plans, last_plan_start, last_plan_end, last_plan_ok)
-    total_plans 最多取10个完整计划
+    滚动三期计划：遍历历史记录（按时间升序），一旦命中或连黑3期，计划结束。
+    返回: (total_plans, success_plans, plans_list)
+    plans_list 是最近10个已完成计划的列表，每个元素为 {"range": "3461013～3461015", "success": True/False}
     """
-    if len(hist) < 3:
-        return 0, 0, "", "", False
+    if len(hist) < 1:
+        return 0, 0, []
 
-    sorted_hist = sorted(hist, key=lambda x: x["period"], reverse=True)
+    # 按时间升序排列（从旧到新）
+    sorted_hist = sorted(hist, key=lambda x: x["period"])
     plans = []
-    for i in range(0, len(sorted_hist), 3):
-        group = sorted_hist[i:i+3]
-        if len(group) < 3:
-            break
-        success = any(g["hitA"] or g["hitB"] for g in group)
-        start_period = group[-1]["period"]
-        end_period = group[0]["period"]
-        plans.append({
-            "start": start_period,
-            "end": end_period,
-            "success": success
-        })
-    if not plans:
-        return 0, 0, "", "", False
+    i = 0
+    while i < len(sorted_hist):
+        start_period = sorted_hist[i]["period"]
+        # 检查接下来的三期（包括当前期）
+        hit = False
+        end_index = i
+        for j in range(3):
+            idx = i + j
+            if idx >= len(sorted_hist):
+                break
+            if sorted_hist[idx]["hitA"] or sorted_hist[idx]["hitB"]:
+                end_index = idx
+                hit = True
+                break
+            end_index = idx
+        # 确定计划结束期
+        if hit:
+            end_period = sorted_hist[end_index]["period"]
+            plans.append({"range": f"{start_period}～{end_period}", "success": True})
+            i = end_index + 1  # 从命中期的下一期开始新计划
+        else:
+            # 三期都没命中（或者剩余不足3期也算完成）
+            if i + 2 < len(sorted_hist):
+                end_period = sorted_hist[i+2]["period"]
+            else:
+                end_period = sorted_hist[-1]["period"]
+            plans.append({"range": f"{start_period}～{end_period}", "success": False})
+            i = i + 3  # 从下一期开始新计划
 
-    total = min(len(plans), 10)
-    recent_plans = plans[:total]
+    if not plans:
+        return 0, 0, []
+
+    # 只取最近10个（倒序取前10）
+    recent_plans = list(reversed(plans))[:10]
     success_count = sum(1 for p in recent_plans if p["success"])
-    last = recent_plans[0]
-    return total, success_count, last["start"], last["end"], last["success"]
+    return len(recent_plans), success_count, recent_plans
 
 
 # ==================== 数据获取与分析 ====================
@@ -395,19 +413,18 @@ async def check_and_push(bot: Bot):
 
     fill_history_gaps()
 
-    # ---------- 三期计划统计 ----------
-    total_plans, success_plans, plan_start, plan_end, plan_ok = calc_plan_stats(history)
+    # ---------- 滚动三期计划统计 ----------
+    total_plans, success_plans, recent_plans = calc_plan_stats(history)
     if total_plans > 0:
         plan_rate = success_plans / total_plans * 100
         plan_info = f"💡 单期 计划命中率：{plan_rate:.0f}%\n"
-        last_plan_line = f"{plan_start}～{plan_end} {'✅' if plan_ok else '❌'}\n"
+        plan_lines = "\n".join(f"{p['range']} {'✅' if p['success'] else '❌'}" for p in recent_plans) + "\n"
     else:
         plan_info = "💡 单期 计划命中率：暂无数据\n"
-        last_plan_line = ""
+        plan_lines = ""
     # ---------------------------------
 
     display_b = result["b"]
-    # 本期推荐逻辑不显示细节，只保留组合
     a_display = f"{result['a']} 第{result['aPeriod']}期"
     b_display = f"{display_b} 第{result['bPeriod']}期"
 
@@ -444,8 +461,11 @@ async def check_and_push(bot: Bot):
         f"⏰ 有效期：{curr_period}～{valid_end}\n"
         f"{plan_info}"
         f"━━━━━━━━━━━━━━━━\n"
-        f"{last_plan_line}"
+        f"{plan_lines}"
     )
+
+    if DELAY_SECONDS > 0:
+        await asyncio.sleep(DELAY_SECONDS)
 
     if not subscribers:
         logger.warning("没有订阅群组，跳过推送")
@@ -513,7 +533,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     win = api_data[:min(MAX_WINDOW, len(api_data))]
     result = get_recommendation(win, yinyu_state)
     cnt = result["cnt"]
-    total_plans, success_plans, _, _, _ = calc_plan_stats(history)
+    total_plans, success_plans, _ = calc_plan_stats(history)
     plan_str = f"💡 单期 计划命中率：{success_plans/total_plans*100:.0f}% ({success_plans}/{total_plans})" if total_plans > 0 else "💡 单期 计划命中率：暂无数据"
     msg = (
         f"📊 <b>当前状态</b>\n"
