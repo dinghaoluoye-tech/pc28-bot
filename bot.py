@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-游刃有余双冷方案 · Telegram 自动推送机器人 (无白名单)
-- 任何群均可订阅
-- 底部显示最近10个滚动三期计划
+游刃有余双冷方案 · Telegram 自动推送机器人
+- 历史记录持久化到 /data 目录
+- 滚动显示最近10个三期计划
 - 单期命中率 = 历史总命中比例
 - 可配置延迟发布（环境变量 DELAY_SECONDS）
 """
@@ -23,9 +23,9 @@ from telegram.ext import (
 
 # ==================== 配置 ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-TARGET_CHAT_ID = os.environ.get("TARGET_CHAT_ID", "")   # 初始订阅群组（可选）
+TARGET_CHAT_ID = os.environ.get("TARGET_CHAT_ID", "")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
-DATA_DIR = Path(os.environ.get("DATA_DIR", "./data"))
+DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))   # ★ 改为 /data 持久化
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 DELAY_SECONDS = int(os.environ.get("DELAY_SECONDS", "0"))
 API_URL = "https://dp28-engine.vercel.app/api/pc28"
@@ -393,7 +393,7 @@ async def check_and_push(bot: Bot):
     save_all_state()
 
 
-# ==================== 命令处理（无限制） ====================
+# ==================== 命令处理 ====================
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎯 <b>游刃有余双冷方案</b>\n命令：/subscribe /unsubscribe /status /stats /history /help", parse_mode=ParseMode.HTML)
