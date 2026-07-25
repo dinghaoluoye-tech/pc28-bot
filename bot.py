@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-终极修复版：使用 ensure_future 确保启动补全，多实例冲突防护。
+最终强制补全版：每次推送前检查历史记录，不足30条则自动补全。
 """
 import os, json, asyncio, logging
 import httpx
@@ -67,7 +67,7 @@ def get_recommendation(win, state):
     if morph["triggered"]:
         mapping={"连续出单":("大单","小单"),"连续出双":("大双","小双"),"大双小单交替":("大双","小单"),"大单小双交替":("大单","小双"),"连续出大":("大双","大单"),"连续出小":("小双","小单"),"单双跳":("大单","小双"),"大小跳":("大单","小双")}
         a_rec,b_rec=mapping.get(morph["type"],("大双","小双"))
-        return {"a":a_rec,"b":b_rec,"aPeriod":1,"bPeriod":1,"cnt":cnt}
+        return {"a":a_rec,"b":b_rec,"aPeriod":1,"bPeriod":1,"cnt":cnt,"isMorph":True}
     need_new_a=not a["rec"] or a["period"]==1
     need_new_b=not b["rec"] or b["period"]==1
     new_a=a["rec"]; new_b=b["rec"]
@@ -93,9 +93,8 @@ def get_recommendation(win, state):
                 new_b=hot_combo
     return {"a":new_a,"b":new_b,"aPeriod":a["period"],"bPeriod":b["period"],"cnt":cnt}
 
-# 全局变量
 api_data = []
-history = []
+history = []   # 格式: {"period":..., "hitA":bool, "hitB":bool}
 yinyu_state = {"a":{"period":1,"rec":""},"b":{"period":1,"rec":""}}
 last_period = ""
 subscribers = set()
@@ -142,32 +141,25 @@ async def fetch_api_data():
     except Exception as e: logger.error(f"API错误: {e}")
     return []
 
-async def startup_fill_history():
-    """启动时主动拉取数据并补全历史"""
-    global api_data, history
-    logger.info("正在启动补全历史...")
-    data = await fetch_api_data()
-    if data:
-        api_data = data[:MAX_WINDOW]
-        win_fill = api_data[1:]
-        temp_state = {"a":{"period":1,"rec":""},"b":{"period":1,"rec":""}}
-        for item in api_data:
-            if any(h["period"]==item["period"] for h in history): continue
-            rec = get_recommendation(win_fill, temp_state)
-            hit_a = (item["combo"]==rec["a"]); hit_b = (item["combo"]==rec["b"])
-            history.append({"period":item["period"],"hitA":hit_a,"hitB":hit_b})
-        history.sort(key=lambda x:int(x["period"]), reverse=True)
-        plans,_,_ = calc_plan_stats(history)
-        logger.info(f"补全完成，历史记录 {len(history)} 期，生成 {len(plans)} 个三期计划")
-        # 如果已有订阅者，发送一条测试消息
-        if subscribers and plans:
-            try:
-                test_msg = f"✅ 补全了 {len(history)} 期历史，生成了 {len(plans)} 个三期计划。"
-                for chat_id in list(subscribers):
-                    await Bot(BOT_TOKEN).send_message(chat_id=chat_id, text=test_msg)
-            except: pass
-    else:
-        logger.warning("补全历史失败，未获取到 API 数据")
+def fill_history():
+    """用当前 api_data 补全历史记录，直到达到 30 条或数据用完"""
+    global history, api_data
+    if len(api_data) < 5: return
+    win_fill = api_data[1:]   # 不包含最早一期
+    temp_state = {"a":{"period":1,"rec":""},"b":{"period":1,"rec":""}}
+    for item in api_data:
+        if any(h["period"]==item["period"] for h in history): continue
+        rec = get_recommendation(win_fill, temp_state)
+        hit_a = (item["combo"]==rec["a"]); hit_b = (item["combo"]==rec["b"])
+        history.append({"period":item["period"],"hitA":hit_a,"hitB":hit_b})
+    # 去重排序
+    seen=set()
+    new_hist=[]
+    for h in history:
+        if h["period"] not in seen:
+            seen.add(h["period"]); new_hist.append(h)
+    new_hist.sort(key=lambda x:int(x["period"]), reverse=True)
+    history = new_hist[:500]
 
 async def check_and_push(bot: Bot):
     global api_data, last_period, yinyu_state, history
@@ -179,6 +171,10 @@ async def check_and_push(bot: Bot):
     if fresh:
         api_data=fresh+api_data
         if len(api_data)>MAX_WINDOW: api_data=api_data[:MAX_WINDOW]
+
+    # 每次检查，如果历史记录少于30条，立即补全
+    if len(history) < 30 and len(api_data) >= 5:
+        fill_history()
 
     if latest_period==last_period: return
     logger.info(f"新期号: {latest_period}")
@@ -255,7 +251,6 @@ def update_state(latest,win,state):
     return state
 
 def apply_recommendation(result,state):
-    # 安全应用推荐，避免 KeyError
     if result.get("isMorph"):
         state["a"]["rec"]=result["a"]; state["a"]["period"]=1
         state["b"]["rec"]=result["b"]; state["b"]["period"]=1
@@ -264,7 +259,6 @@ def apply_recommendation(result,state):
         if result.get("needNewB"): state["b"]["rec"]=result["b"]; state["b"]["period"]=1
     return state
 
-# 命令处理
 async def cmd_start(update,context): await update.message.reply_text("🎯 游刃有余双冷方案\n命令：/subscribe /unsubscribe /status /stats /history /help",parse_mode=ParseMode.HTML)
 async def cmd_subscribe(update,context):
     chat_id=update.effective_chat.id
@@ -318,8 +312,6 @@ def main():
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_error_handler(error_handler)
     app.job_queue.run_repeating(polling_job, interval=POLL_INTERVAL, first=3)
-    # 启动后立即补全历史（使用 ensure_future 确保任务被调度）
-    asyncio.ensure_future(startup_fill_history())
     logger.info("🚀 Polling模式启动"); app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
