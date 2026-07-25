@@ -1,0 +1,10 @@
+{
+  "deploy": {
+    "volumes": [
+      {
+        "mountPath": "/data",
+        "name": "bot-data"
+      }
+    ]
+  }
+}
