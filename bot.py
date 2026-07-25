@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
 游刃有余双冷方案 · Telegram 自动推送机器人
-- 历史记录持久化到 /data 目录
-- 滚动显示最近10个三期计划
+- 数据持久化到 /data
+- 推送消息中显示已记录期数（方便诊断）
+- 底部显示最近10个滚动三期计划
 - 单期命中率 = 历史总命中比例
 - 可配置延迟发布（环境变量 DELAY_SECONDS）
 """
@@ -25,18 +26,21 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 TARGET_CHAT_ID = os.environ.get("TARGET_CHAT_ID", "")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
-DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))   # ★ 改为 /data 持久化
+# 强制使用 /data 目录（与 Railway Volume 挂载路径一致）
+DATA_DIR = Path("/data")
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "5"))
 DELAY_SECONDS = int(os.environ.get("DELAY_SECONDS", "0"))
 API_URL = "https://dp28-engine.vercel.app/api/pc28"
 MAX_WINDOW = 11
-MAX_HISTORY = 500
+MAX_HISTORY = 1000          # 历史记录最多保存 1000 期，确保能生成足够计划
 COMBO_ORDER = ["小单", "小双", "大单", "大双"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("pc28-bot")
 
+# 确保数据目录存在
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+logger.info(f"数据目录: {DATA_DIR}")
 
 # ==================== 核心逻辑 ====================
 
@@ -49,8 +53,7 @@ def get_combo(sum_val: int) -> str:
 
 def count_window(win: list) -> dict:
     cnt = {"小单": 0, "小双": 0, "大单": 0, "大双": 0}
-    for item in win:
-        cnt[item["combo"]] += 1
+    for item in win: cnt[item["combo"]] += 1
     return cnt
 
 
@@ -338,6 +341,10 @@ async def check_and_push(bot: Bot):
 
     plan_lines = "\n".join(f"{p['range']} {'✅' if p['success'] else '❌'}" for p in recent_plans) + "\n"
 
+    # 添加诊断信息：显示已记录期数
+    total_records = len(history)
+    diag_line = f"📈 已记录 {total_records} 期对错数据\n"
+
     display_b = result["b"]
     a_display = f"{result['a']} 第{result['aPeriod']}期"
     b_display = f"{display_b} 第{result['bPeriod']}期"
@@ -372,6 +379,7 @@ async def check_and_push(bot: Bot):
         f"{plan_info}"
         f"━━━━━━━━━━━━━━━━\n"
         f"{plan_lines}"
+        f"{diag_line}"
     )
 
     if DELAY_SECONDS > 0:
@@ -430,7 +438,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 <b>当前状态</b>\n期号：{api_data[0]['period']}\n"
         f"推荐：A {result['a']} 第{result['aPeriod']}期 / B {result['b']} 第{result['bPeriod']}期\n"
         f"窗口统计：小单{cnt['小单']} 小双{cnt['小双']} 大单{cnt['大单']} 大双{cnt['大双']}\n"
-        f"{plan_str}\n📢 订阅群组：{len(subscribers)} 个"
+        f"{plan_str}\n"
+        f"📈 历史记录：{len(history)} 期\n"
+        f"📢 订阅群组：{len(subscribers)} 个"
     )
     await update.message.reply_text(msg, parse_mode=ParseMode.HTML)
 
