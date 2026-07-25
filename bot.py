@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-"""
-最终强制补全版：每次推送前检查历史记录，不足30条则自动补全。
-"""
 import os, json, asyncio, logging
 import httpx
 from telegram import Update, Bot
@@ -18,37 +15,28 @@ COMBO_ORDER = ["小单","小双","大单","大双"]
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("pc28-bot")
 
-def get_combo(s):
-    return "大单" if s>=14 and s%2==1 else "大双" if s>=14 and s%2==0 else "小单" if s<14 and s%2==1 else "小双"
-
-def count_window(win):
+def get_combo(s): return "大单" if s>=14 and s%2==1 else "大双" if s>=14 and s%2==0 else "小单" if s<14 and s%2==1 else "小双"
+def count_window(win): 
     cnt = {"小单":0,"小双":0,"大单":0,"大双":0}
     for i in win: cnt[i["combo"]]+=1
     return cnt
 
 def detect_morph(win):
     if len(win)<5: return {"triggered":False}
-    single_run=0
-    for i in win:
-        if "单" in i["combo"]: single_run+=1
-        else: break
-    if single_run>=4: return {"triggered":True,"type":"连续出单","detail":f"近{single_run}期全是单"}
-    double_run=0
-    for i in win:
-        if "双" in i["combo"]: double_run+=1
-        else: break
-    if double_run>=4: return {"triggered":True,"type":"连续出双","detail":f"近{double_run}期全是双"}
+    for name,check in [("单","连续出单"),("双","连续出双")]:
+        run=0
+        for i in win:
+            if name in i["combo"]: run+=1
+            else: break
+        if run>=4: return {"triggered":True,"type":check,"detail":f"近{run}期全是{name}"}
     r5=win[:5]
-    dsxd=sum(1 for i in r5 if i["combo"] in ("大双","小单"))
-    if dsxd==5: return {"triggered":True,"type":"大双小单交替","detail":"近5期全部为大双+小单"}
-    ddxs=sum(1 for i in r5 if i["combo"] in ("大单","小双"))
-    if ddxs==5: return {"triggered":True,"type":"大单小双交替","detail":"近5期全部为大单+小双"}
-    big_run=0
+    if sum(1 for i in r5 if i["combo"] in ("大双","小单"))==5: return {"triggered":True,"type":"大双小单交替","detail":"近5期全部为大双+小单"}
+    if sum(1 for i in r5 if i["combo"] in ("大单","小双"))==5: return {"triggered":True,"type":"大单小双交替","detail":"近5期全部为大单+小双"}
+    big_run=0; small_run=0
     for i in win:
         if i["sum"]>=14: big_run+=1
         else: break
     if big_run>=4: return {"triggered":True,"type":"连续出大","detail":f"近{big_run}期全部≥14"}
-    small_run=0
     for i in win:
         if i["sum"]<14: small_run+=1
         else: break
@@ -65,8 +53,8 @@ def get_recommendation(win, state):
     a=state.get("a",{"period":1,"rec":""})
     b=state.get("b",{"period":1,"rec":""})
     if morph["triggered"]:
-        mapping={"连续出单":("大单","小单"),"连续出双":("大双","小双"),"大双小单交替":("大双","小单"),"大单小双交替":("大单","小双"),"连续出大":("大双","大单"),"连续出小":("小双","小单"),"单双跳":("大单","小双"),"大小跳":("大单","小双")}
-        a_rec,b_rec=mapping.get(morph["type"],("大双","小双"))
+        m={"连续出单":("大单","小单"),"连续出双":("大双","小双"),"大双小单交替":("大双","小单"),"大单小双交替":("大单","小双"),"连续出大":("大双","大单"),"连续出小":("小双","小单"),"单双跳":("大单","小双"),"大小跳":("大单","小双")}
+        a_rec,b_rec=m.get(morph["type"],("大双","小双"))
         return {"a":a_rec,"b":b_rec,"aPeriod":1,"bPeriod":1,"cnt":cnt,"isMorph":True}
     need_new_a=not a["rec"] or a["period"]==1
     need_new_b=not b["rec"] or b["period"]==1
@@ -89,12 +77,11 @@ def get_recommendation(win, state):
             for item in win:
                 if item["combo"]==hot_combo: break
                 hot_miss+=1
-            if hot_miss<2 and hot_combo!=new_a:
-                new_b=hot_combo
+            if hot_miss<2 and hot_combo!=new_a: new_b=hot_combo
     return {"a":new_a,"b":new_b,"aPeriod":a["period"],"bPeriod":b["period"],"cnt":cnt}
 
 api_data = []
-history = []   # 格式: {"period":..., "hitA":bool, "hitB":bool}
+history = []   # {"period":..., "hitA":bool, "hitB":bool}
 yinyu_state = {"a":{"period":1,"rec":""},"b":{"period":1,"rec":""}}
 last_period = ""
 subscribers = set()
@@ -141,25 +128,21 @@ async def fetch_api_data():
     except Exception as e: logger.error(f"API错误: {e}")
     return []
 
-def fill_history():
-    """用当前 api_data 补全历史记录，直到达到 30 条或数据用完"""
-    global history, api_data
-    if len(api_data) < 5: return
-    win_fill = api_data[1:]   # 不包含最早一期
-    temp_state = {"a":{"period":1,"rec":""},"b":{"period":1,"rec":""}}
-    for item in api_data:
-        if any(h["period"]==item["period"] for h in history): continue
-        rec = get_recommendation(win_fill, temp_state)
-        hit_a = (item["combo"]==rec["a"]); hit_b = (item["combo"]==rec["b"])
-        history.append({"period":item["period"],"hitA":hit_a,"hitB":hit_b})
-    # 去重排序
-    seen=set()
-    new_hist=[]
-    for h in history:
-        if h["period"] not in seen:
-            seen.add(h["period"]); new_hist.append(h)
-    new_hist.sort(key=lambda x:int(x["period"]), reverse=True)
-    history = new_hist[:500]
+async def startup_fill_history():
+    global api_data, history
+    logger.info("正在启动补全历史...")
+    data = await fetch_api_data()
+    if data:
+        api_data = data[:MAX_WINDOW]
+        win_fill = api_data[1:]
+        temp_state = {"a":{"period":1,"rec":""},"b":{"period":1,"rec":""}}
+        for item in api_data:
+            if any(h["period"]==item["period"] for h in history): continue
+            rec = get_recommendation(win_fill, temp_state)
+            hit_a = (item["combo"]==rec["a"]); hit_b = (item["combo"]==rec["b"])
+            history.append({"period":item["period"],"hitA":hit_a,"hitB":hit_b})
+        history.sort(key=lambda x:int(x["period"]), reverse=True)
+        logger.info(f"补全完成，历史记录 {len(history)} 期")
 
 async def check_and_push(bot: Bot):
     global api_data, last_period, yinyu_state, history
@@ -172,9 +155,21 @@ async def check_and_push(bot: Bot):
         api_data=fresh+api_data
         if len(api_data)>MAX_WINDOW: api_data=api_data[:MAX_WINDOW]
 
-    # 每次检查，如果历史记录少于30条，立即补全
+    # 每次推送前补全历史（不足30条时）
     if len(history) < 30 and len(api_data) >= 5:
-        fill_history()
+        win_fill = api_data[1:]
+        temp_state = {"a":{"period":1,"rec":""},"b":{"period":1,"rec":""}}
+        for item in api_data:
+            if any(h["period"]==item["period"] for h in history): continue
+            rec = get_recommendation(win_fill, temp_state)
+            hit_a = (item["combo"]==rec["a"]); hit_b = (item["combo"]==rec["b"])
+            history.append({"period":item["period"],"hitA":hit_a,"hitB":hit_b})
+        seen=set(); new_hist=[]
+        for h in history:
+            if h["period"] not in seen:
+                seen.add(h["period"]); new_hist.append(h)
+        new_hist.sort(key=lambda x:int(x["period"]), reverse=True)
+        history = new_hist[:500]
 
     if latest_period==last_period: return
     logger.info(f"新期号: {latest_period}")
@@ -233,7 +228,6 @@ async def check_and_push(bot: Bot):
             logger.info(f"已推送到 {chat_id}")
         except Exception as e:
             logger.error(f"推送失败 {chat_id}: {e}")
-            if "Forbidden" in str(e): subscribers.discard(chat_id)
 
     last_period=latest_period
 
@@ -312,6 +306,9 @@ def main():
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_error_handler(error_handler)
     app.job_queue.run_repeating(polling_job, interval=POLL_INTERVAL, first=3)
+    # 启动后立即补全历史
+    loop = asyncio.get_event_loop()
+    loop.create_task(startup_fill_history())
     logger.info("🚀 Polling模式启动"); app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
