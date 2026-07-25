@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-终极补全版：启动后立即从 API 补全近期历史，无需等待，立即可见 10 条三期计划。
+终极修复版：使用 ensure_future 确保启动补全，多实例冲突防护。
 """
 import os, json, asyncio, logging
 import httpx
@@ -157,9 +157,17 @@ async def startup_fill_history():
             hit_a = (item["combo"]==rec["a"]); hit_b = (item["combo"]==rec["b"])
             history.append({"period":item["period"],"hitA":hit_a,"hitB":hit_b})
         history.sort(key=lambda x:int(x["period"]), reverse=True)
-        logger.info(f"补全完成，历史记录 {len(history)} 期")
-        return True
-    return False
+        plans,_,_ = calc_plan_stats(history)
+        logger.info(f"补全完成，历史记录 {len(history)} 期，生成 {len(plans)} 个三期计划")
+        # 如果已有订阅者，发送一条测试消息
+        if subscribers and plans:
+            try:
+                test_msg = f"✅ 补全了 {len(history)} 期历史，生成了 {len(plans)} 个三期计划。"
+                for chat_id in list(subscribers):
+                    await Bot(BOT_TOKEN).send_message(chat_id=chat_id, text=test_msg)
+            except: pass
+    else:
+        logger.warning("补全历史失败，未获取到 API 数据")
 
 async def check_and_push(bot: Bot):
     global api_data, last_period, yinyu_state, history
@@ -247,6 +255,7 @@ def update_state(latest,win,state):
     return state
 
 def apply_recommendation(result,state):
+    # 安全应用推荐，避免 KeyError
     if result.get("isMorph"):
         state["a"]["rec"]=result["a"]; state["a"]["period"]=1
         state["b"]["rec"]=result["b"]; state["b"]["period"]=1
@@ -309,9 +318,8 @@ def main():
     app.add_handler(CommandHandler("chatid", cmd_chatid))
     app.add_error_handler(error_handler)
     app.job_queue.run_repeating(polling_job, interval=POLL_INTERVAL, first=3)
-    # 启动后立即补全历史
-    loop = asyncio.get_event_loop()
-    loop.create_task(startup_fill_history())
+    # 启动后立即补全历史（使用 ensure_future 确保任务被调度）
+    asyncio.ensure_future(startup_fill_history())
     logger.info("🚀 Polling模式启动"); app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
